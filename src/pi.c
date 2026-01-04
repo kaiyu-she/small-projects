@@ -111,30 +111,58 @@ void chudnovsky(mpf_t r_pi, long n, int threads) {
     if (n < threads * 2) threads = 1;
     long interval = n / threads;
     debug("interval: %ld\n", interval);
-    mpz_t p_vals[threads];
-    mpz_t q_vals[threads];
-    mpz_t r_vals[threads];
+    int num_vals = threads;
+    mpz_t* p_vals = malloc(num_vals * sizeof(mpz_t));
+    mpz_t* q_vals = malloc(num_vals * sizeof(mpz_t));
+    mpz_t* r_vals = malloc(num_vals * sizeof(mpz_t));
 
     #pragma omp parallel for num_threads(threads)
-    for (int i = 0; i < threads; i++) {
+    for (int i = 0; i < num_vals; i++) {
         long start = i * interval + 1;
-        long end = (i == threads - 1) ? n : (i + 1) * interval + 1;
+        long end = (i == num_vals - 1) ? n : (i + 1) * interval + 1;
         mpz_inits(p_vals[i], q_vals[i], r_vals[i], NULL);
         binary_split(p_vals[i], q_vals[i], r_vals[i], start, end);
     }
 
     debug("performing reduction\n");
+
+    while (num_vals > 1) {
+        // reduce in pairs until only one value is left
+        int new_num_vals = (num_vals + 1) / 2;
+        debug("number of values: current %d, next %d\n", num_vals, new_num_vals);
+        mpz_t* new_p_vals = malloc(new_num_vals * sizeof(mpz_t));
+        mpz_t* new_q_vals = malloc(new_num_vals * sizeof(mpz_t));
+        mpz_t* new_r_vals = malloc(new_num_vals * sizeof(mpz_t));
+        
+        #pragma omp parallel for num_threads(threads)
+        for (int i = 0; i < num_vals - 1; i += 2) {
+            int new_i = i / 2;
+            mpz_inits(new_p_vals[new_i], new_q_vals[new_i], new_r_vals[new_i], NULL);
+            pqr_combine(new_p_vals[new_i], new_q_vals[new_i], new_r_vals[new_i],
+                p_vals[i], q_vals[i], r_vals[i],
+                p_vals[i + 1], q_vals[i + 1], r_vals[i + 1]);
+            mpz_clears(p_vals[i], q_vals[i], r_vals[i],
+                p_vals[i + 1], q_vals[i + 1], r_vals[i + 1], NULL);
+        }
+        if (num_vals & 1) {
+            int new_prev = new_num_vals - 1;
+            int prev = num_vals - 1;
+            mpz_init_set(new_p_vals[new_prev], p_vals[prev]);
+            mpz_init_set(new_q_vals[new_prev], q_vals[prev]);
+            mpz_init_set(new_r_vals[new_prev], r_vals[prev]);
+            mpz_clears(p_vals[prev], q_vals[prev], r_vals[prev], NULL);
+        }
+        free(p_vals);
+        free(q_vals);
+        free(r_vals);
+        p_vals = new_p_vals;
+        q_vals = new_q_vals;
+        r_vals = new_r_vals;
+        num_vals = new_num_vals;
+    }
+
     mpz_t p, q, r;
     mpz_inits(p, q, r, NULL);
-    if (threads > 1) {
-        // perform reduction by combining values with first
-        for (int i = 1; i < threads; i++) {
-            pqr_combine(p_vals[0], q_vals[0], r_vals[0],
-                p_vals[0], q_vals[0], r_vals[0],
-                p_vals[i], q_vals[i], r_vals[i]);
-            mpz_clears(p_vals[i], q_vals[i], r_vals[i], NULL);
-        }
-    }
     mpz_set(p, p_vals[0]);
     mpz_set(q, q_vals[0]);
     mpz_set(r, r_vals[0]);
@@ -239,7 +267,7 @@ int main(int argc, char** argv) {
     mpf_set_default_prec(prec_bits);
     mpf_t pi;
     mpf_init(pi);
-    int n = prec / 14 > 1 ? prec / 14 + 1 : 2;
+    int n = prec / 14 > 1 ? prec / 14 : 2;
     clock_t start = clock();
     chudnovsky(pi, n, threads);
     double duration = (double)(clock() - start) / CLOCKS_PER_SEC;
